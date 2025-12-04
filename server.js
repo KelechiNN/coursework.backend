@@ -1,4 +1,4 @@
-// server.js  (CommonJS – matches your current package.json)
+// server.js  (CommonJS version)
 const express = require("express");
 const cors = require("cors");
 const { MongoClient, ObjectId } = require("mongodb");
@@ -46,16 +46,17 @@ if (!uri) {
 
 let db;
 
+// on your laptop TLS may fail => db stays null
 async function connectDB() {
   if (!uri) return;
   try {
     const client = new MongoClient(uri);
     await client.connect();
-    db = client.db(); // uses the DB name from your connection string
+    db = client.db(); // uses DB from the connection string
     console.log("✅ Connected to MongoDB Atlas");
   } catch (err) {
     console.error("❌ Failed to connect to MongoDB:", err);
-    db = null; // fall back to local data
+    db = null; // important: keep app running with fallback
   }
 }
 
@@ -67,7 +68,7 @@ const FALLBACK_LESSONS = [
     id: "1",
     subject: "Math",
     location: "North London",
-    price: 20,
+    price: 21,
     spaces: 5,
     description:
       "Improve your algebra, fractions, equations and problem-solving skills.",
@@ -166,13 +167,13 @@ app.get("/", (req, res) => {
   res.send("✅ Backend API is running. Try GET /lessons");
 });
 
-// GET /lessons  (coursework: REST API + fetch GET)
+// A) GET /lessons  (coursework: REST API + Postman + fetch)
 app.get("/lessons", async (req, res) => {
   try {
-    // If DB isn't connected (TLS drama on your laptop),
+    // If DB isn't connected (TLS problem locally),
     // fall back to the hard-coded lessons above.
     if (!db) {
-      console.warn("DB not connected, returning FALLBACK_LESSONS.");
+      console.warn("DB not connected, returning fallback lessons.");
       return res.json(FALLBACK_LESSONS);
     }
 
@@ -195,112 +196,82 @@ app.get("/lessons", async (req, res) => {
   }
 });
 
-// POST /orders  (coursework: save new order)
+// B) POST /orders  (coursework: save new order)
 app.post("/orders", async (req, res) => {
-  const { name, phone, email, items, total } = req.body;
-
-  if (!name || !phone || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: "Invalid order data" });
-  }
-
-  // If DB not connected locally, act like a "demo save" so front-end doesn’t break
-  if (!db) {
-    console.warn("DB not connected, accepting order in DEMO mode only.");
-    return res.status(200).json({
-      message: "Order accepted (demo – DB not connected on this machine)",
-      demo: true,
-    });
-  }
-
   try {
-    // coursework says: minimal fields name, phone, lesson IDs, number of spaces
-    const lessonIDs = [];
-    let totalSpaces = 0;
+    const { name, phone, email, items, total } = req.body;
 
-    items.forEach((item) => {
-      if (item.lessonId && item.quantity) {
-        // on Render, lessonId will be the stringified _id
-        try {
-          lessonIDs.push(new ObjectId(item.lessonId));
-        } catch {
-          // if it isn’t a valid ObjectId, just store raw id
-          lessonIDs.push(item.lessonId);
-        }
-        totalSpaces += Number(item.quantity);
-      }
-    });
+    if (!name || !phone || !Array.isArray(items) || items.length === 0) {
+      return res
+        .status(400)
+        .json({ error: "name, phone and items are required" });
+    }
 
     const orderDoc = {
       name,
       phone,
       email: email || null,
-      lessonIDs,
-      spaces: totalSpaces,
-      items,
-      total,
+      items, // [{ lessonId, quantity, price }]
+      total: total || 0,
       createdAt: new Date(),
     };
 
-    const result = await db.collection("orders").insertOne(orderDoc);
+    if (!db) {
+      console.warn("DB not connected, mocking order save.");
+      console.log("Mock order payload:", orderDoc);
+      return res
+        .status(201)
+        .json({ message: "Order received (mock, no DB)", order: orderDoc });
+    }
 
-    res.status(201).json({
-      message: "Order saved",
-      orderId: result.insertedId,
-    });
+    const result = await db.collection("orders").insertOne(orderDoc);
+    res
+      .status(201)
+      .json({ message: "Order stored", orderId: result.insertedId.toString() });
   } catch (err) {
     console.error("Error saving order:", err);
     res.status(500).json({ error: "Failed to save order" });
   }
 });
 
-// PUT /lessons/:id  (coursework: update any attribute, esp. spaces)
+// C) PUT /lessons/:id  (coursework: update lesson attributes, esp. spaces)
 app.put("/lessons/:id", async (req, res) => {
   const { id } = req.params;
-
-  // If DB not connected locally, behave as demo
-  if (!db) {
-    console.warn(
-      `DB not connected, pretending to update lesson ${id} in DEMO mode.`
-    );
-    return res.status(200).json({
-      message: "Lesson update accepted (demo – DB not connected)",
-      demo: true,
-    });
-  }
+  const update = req.body || {};
 
   try {
-    const updateFields = {};
-    // allow updating any of these attributes
-    ["subject", "location", "price", "spaces", "description", "image"].forEach(
-      (field) => {
-        if (req.body[field] !== undefined) {
-          updateFields[field] = req.body[field];
-        }
+    if (!db) {
+      // fallback: update in-memory array
+      const idx = FALLBACK_LESSONS.findIndex((l) => l.id === id);
+      if (idx === -1) {
+        return res.status(404).json({ error: "Lesson not found (fallback)" });
       }
-    );
-
-    if (Object.keys(updateFields).length === 0) {
-      return res.status(400).json({ error: "No valid fields to update" });
+      FALLBACK_LESSONS[idx] = { ...FALLBACK_LESSONS[idx], ...update };
+      return res.json({
+        message: "Lesson updated (fallback, no DB)",
+        lesson: FALLBACK_LESSONS[idx],
+      });
     }
 
-    const filter = { _id: new ObjectId(id) };
-
-    const result = await db.collection("lesson").updateOne(filter, {
-      $set: updateFields,
-    });
+    const result = await db
+      .collection("lesson")
+      .updateOne({ _id: new ObjectId(id) }, { $set: update });
 
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: "Lesson not found" });
     }
 
-    res.json({ message: "Lesson updated", modifiedCount: result.modifiedCount });
+    res.json({
+      message: "Lesson updated",
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+    });
   } catch (err) {
     console.error("Error updating lesson:", err);
     res.status(500).json({ error: "Failed to update lesson" });
   }
 });
 
-// ======= start server =======
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
