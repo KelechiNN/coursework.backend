@@ -195,6 +195,49 @@ app.get("/lessons", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch lessons" });
   }
 });
+// ---------- GET /search?q=term ----------
+app.get("/search", async (req, res) => {
+  const q = (req.query.q || "").toLowerCase();
+
+  try {
+    // If no query, just behave like /lessons
+    if (!q) {
+      if (!db) {
+        console.warn("Using FALLBACK_LESSONS in /search (no query, no db).");
+        return res.json(FALLBACK_LESSONS.map(normaliseLesson));
+      }
+      const docs = await db.collection("lesson").find({}).toArray();
+      return res.json(docs.map(normaliseLesson));
+    }
+
+    // If DB is not connected → filter fallback data in memory
+    if (!db) {
+      console.warn("Using FALLBACK_LESSONS in /search (no db).");
+      const filtered = FALLBACK_LESSONS.filter((l) => {
+        const text = `${l.subject} ${l.location} ${l.price} ${l.spaces}`.toLowerCase();
+        return text.includes(q);
+      });
+      return res.json(filtered.map(normaliseLesson));
+    }
+
+    // MongoDB search (subject OR location contains q, case-insensitive)
+    const docs = await db
+      .collection("lesson")
+      .find({
+        $or: [
+          { subject: { $regex: q, $options: "i" } },
+          { location: { $regex: q, $options: "i" } },
+        ],
+      })
+      .toArray();
+
+    res.json(docs.map(normaliseLesson));
+  } catch (err) {
+    console.error("Error in GET /search:", err);
+    res.status(500).json({ error: "Search failed" });
+  }
+});
+
 
 // B) POST /orders  (coursework: save new order)
 app.post("/orders", async (req, res) => {
